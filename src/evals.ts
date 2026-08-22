@@ -2,7 +2,7 @@
 // PART 1: The dataset
 // ─────────────────────────────────────────────
 
-import OpenAI from "openai";
+import Anthropic from "@anthropic-ai/sdk";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -78,29 +78,26 @@ export const dataset: TestCase[] = [
 // PART 2: The model
 // ─────────────────────────────────────────────
 
-const client = new OpenAI({
-    baseURL: "https://openrouter.ai/api/v1",
-    apiKey: process.env.OPENROUTER_API_KEY,
+const client = new Anthropic({
+    apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
 export async function callModel(
     model: string,
     prompt: string
 ): Promise<string> {
-    const response = await client.chat.completions.create({
+    const response = await client.messages.create({
         model,
         max_tokens: 64,
-        messages: [
-            {
-                role: "system",
-                content:
-                    "Answer as briefly as possible. One word or number if you can. No punctuation.",
-            },
-            { role: "user", content: prompt },
-        ],
+        system: "Answer as briefly as possible. One word or number if you can. No punctuation.",
+        messages: [{ role: "user", content: prompt }],
     });
 
-    return response.choices[0].message.content?.trim() ?? "";
+    return response.content
+        .filter((b): b is Anthropic.TextBlock => b.type === "text")
+        .map((b) => b.text)
+        .join("")
+        .trim();
 }
 
 // ─────────────────────────────────────────────

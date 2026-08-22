@@ -1,9 +1,6 @@
 import dotenv from "dotenv";
-import OpenAI from "openai";
-import type {
-    ChatCompletionMessageParam,
-    ChatCompletionFunctionTool,
-} from "openai/resources/chat/completions";
+import Anthropic from "@anthropic-ai/sdk";
+import type { MessageParam, Tool as AnthropicTool, TextBlock, ToolUseBlock, ToolResultBlockParam } from "@anthropic-ai/sdk/resources/messages";
 import { BrowserSession } from "./browser.js";
 import { createLoginHandler, type LoginHandler, type ToolEvent } from "./login-handler.js";
 
@@ -15,19 +12,19 @@ export type { ToolEvent, LoginHandler };
 
 export type GuardrailInput = {
     iterations: number;
-    messages: ChatCompletionMessageParam[];
+    messages: MessageParam[];
 };
 
 export type GuardrailResult = { ok: true } | { ok: false; reason: string };
 export type GuardrailFn = (input: GuardrailInput) => GuardrailResult;
 
 export type Tool = {
-    definition: ChatCompletionFunctionTool;
+    definition: AnthropicTool;
     execute: (args: Record<string, unknown>) => Promise<string>;
 };
 
 export type ToolRegistry = {
-    definitions: ChatCompletionFunctionTool[];
+    definitions: AnthropicTool[];
     byName: Map<string, Tool>;
 };
 
@@ -76,17 +73,17 @@ export type HarnessResult = HarnessExecutionResult & {
 
 export const maxIterations =
     (limit: number): GuardrailFn =>
-        ({ iterations }) =>
-            iterations >= limit
-                ? { ok: false, reason: `Guardrail: reached iteration limit (${limit})` }
-                : { ok: true };
+    ({ iterations }) =>
+        iterations >= limit
+            ? { ok: false, reason: `Guardrail: reached iteration limit (${limit})` }
+            : { ok: true };
 
 export const maxMessages =
     (limit: number): GuardrailFn =>
-        ({ messages }) =>
-            messages.length > limit
-                ? { ok: false, reason: `Guardrail: context too large (${messages.length} messages)` }
-                : { ok: true };
+    ({ messages }) =>
+        messages.length > limit
+            ? { ok: false, reason: `Guardrail: context too large (${messages.length} messages)` }
+            : { ok: true };
 
 export function combineGuardrails(...fns: GuardrailFn[]): GuardrailFn {
     return (input) => {
@@ -100,17 +97,17 @@ export function combineGuardrails(...fns: GuardrailFn[]): GuardrailFn {
 
 export const stopAfterUpvote =
     (getUpvotedStory: () => { id: string; title?: string; rank?: number } | null): GuardrailFn =>
-        () => {
-            const story = getUpvotedStory();
-            if (story) {
-                const storyInfo =
-                    story.title && story.rank
-                        ? `"${story.title}" (rank ${story.rank})`
-                        : `story ID ${story.id}`;
-                return { ok: false, reason: `Successfully upvoted ${storyInfo}` };
-            }
-            return { ok: true };
-        };
+    () => {
+        const story = getUpvotedStory();
+        if (story) {
+            const storyInfo =
+                story.title && story.rank
+                    ? `"${story.title}" (rank ${story.rank})`
+                    : `story ID ${story.id}`;
+            return { ok: false, reason: `Successfully upvoted ${storyInfo}` };
+        }
+        return { ok: true };
+    };
 
 export const defaultGuardrails = combineGuardrails(
     maxIterations(15),
@@ -125,30 +122,27 @@ Use tools whenever they help you give a more accurate answer.
 When you have enough information, respond directly and concisely.
 `.trim();
 
-export function createContext(task: string): ChatCompletionMessageParam[] {
+export function createContext(task: string): MessageParam[] {
     return [
-        { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: task },
     ];
 }
 
 export function trimContext(
-    messages: ChatCompletionMessageParam[],
+    messages: MessageParam[],
     maxMessages: number
-): ChatCompletionMessageParam[] {
+): MessageParam[] {
     if (messages.length <= maxMessages) return messages;
 
-    const [system, user] = messages;
-    const rest = messages.slice(2);
-    const trimmed = rest.slice(rest.length - (maxMessages - 2));
-    return [system, user, ...trimmed];
+    const [first, ...rest] = messages;
+    const trimmed = rest.slice(rest.length - (maxMessages - 1));
+    return [first, ...trimmed];
 }
 
 const MAX_CONTEXT_MESSAGES = 20;
 
-export const client = new OpenAI({
-    baseURL: "https://openrouter.ai/api/v1",
-    apiKey: process.env.OPENROUTER_API_KEY,
+export const client = new Anthropic({
+    apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
 // ── Tools ────────────────────────────────────────────────────────
@@ -157,61 +151,49 @@ export function createTools(session: BrowserSession, hooks?: ToolHooks): ToolReg
     const tools: Tool[] = [
         {
             definition: {
-                type: "function",
-                function: {
-                    name: "browser_navigate",
-                    description: "Navigate the browser to a URL.",
-                    parameters: {
-                        type: "object",
-                        properties: {
-                            url: { type: "string" },
-                        },
-                        required: ["url"],
+                name: "browser_navigate",
+                description: "Navigate the browser to a URL.",
+                input_schema: {
+                    type: "object",
+                    properties: {
+                        url: { type: "string", description: "The URL to navigate to." },
                     },
+                    required: ["url"],
                 },
             },
             execute: async ({ url }) => session.navigate(url as string),
         },
         {
             definition: {
-                type: "function",
-                function: {
-                    name: "browser_url",
-                    description:
-                        "Get the URL of the current page. Use this to detect redirects (e.g. being sent to a login page).",
-                    parameters: { type: "object", properties: {}, required: [] },
-                },
+                name: "browser_url",
+                description:
+                    "Get the URL of the current page. Use this to detect redirects (e.g. being sent to a login page).",
+                input_schema: { type: "object", properties: {} },
             },
             execute: async () => session.getUrl(),
         },
         {
             definition: {
-                type: "function",
-                function: {
-                    name: "browser_get_text",
-                    description: "Get the visible text content of the current page.",
-                    parameters: { type: "object", properties: {}, required: [] },
-                },
+                name: "browser_get_text",
+                description: "Get the visible text content of the current page.",
+                input_schema: { type: "object", properties: {} },
             },
             execute: async () => session.getText(),
         },
         {
             definition: {
-                type: "function",
-                function: {
-                    name: "browser_fill",
-                    description: "Fill in an input field on the current page.",
-                    parameters: {
-                        type: "object",
-                        properties: {
-                            selector: {
-                                type: "string",
-                                description: 'CSS selector for the input, e.g. "input[name=\'acct\']"',
-                            },
-                            value: { type: "string", description: "The value to type into the field." },
+                name: "browser_fill",
+                description: "Fill in an input field on the current page.",
+                input_schema: {
+                    type: "object",
+                    properties: {
+                        selector: {
+                            type: "string",
+                            description: 'CSS selector for the input, e.g. "input[name=\'acct\']"',
                         },
-                        required: ["selector", "value"],
+                        value: { type: "string", description: "The value to type into the field." },
                     },
+                    required: ["selector", "value"],
                 },
             },
             execute: async ({ selector, value }) =>
@@ -219,18 +201,15 @@ export function createTools(session: BrowserSession, hooks?: ToolHooks): ToolReg
         },
         {
             definition: {
-                type: "function",
-                function: {
-                    name: "browser_click",
-                    description:
-                        "Click an element on the current page. Also waits for any navigation that results from the click.",
-                    parameters: {
-                        type: "object",
-                        properties: {
-                            selector: { type: "string", description: 'CSS selector, e.g. "input[type=\'submit\']"' },
-                        },
-                        required: ["selector"],
+                name: "browser_click",
+                description:
+                    "Click an element on the current page. Also waits for any navigation that results from the click.",
+                input_schema: {
+                    type: "object",
+                    properties: {
+                        selector: { type: "string", description: 'CSS selector, e.g. "input[type=\'submit\']"' },
                     },
+                    required: ["selector"],
                 },
             },
             execute: async ({ selector }) => {
@@ -250,13 +229,10 @@ export function createTools(session: BrowserSession, hooks?: ToolHooks): ToolReg
         },
         {
             definition: {
-                type: "function",
-                function: {
-                    name: "browser_get_stories",
-                    description:
-                        "Get a structured list of Hacker News stories on the current page — rank, story ID, title, and whether you've already voted. Use this instead of browser_get_text to accurately identify which story to upvote.",
-                    parameters: { type: "object", properties: {}, required: [] },
-                },
+                name: "browser_get_stories",
+                description:
+                    "Get a structured list of Hacker News stories on the current page — rank, story ID, title, and whether you've already voted. Use this instead of browser_get_text to accurately identify which story to upvote.",
+                input_schema: { type: "object", properties: {} },
             },
             execute: async () => {
                 const result = await session.getStories();
@@ -264,26 +240,23 @@ export function createTools(session: BrowserSession, hooks?: ToolHooks): ToolReg
                     try {
                         const stories = JSON.parse(result);
                         hooks.onStoriesLoaded(stories);
-                    } catch { }
+                    } catch {}
                 }
                 return result;
             },
         },
         {
             definition: {
-                type: "function",
-                function: {
-                    name: "browser_has_class",
-                    description:
-                        "Check whether the first element matching a selector has a specific CSS class. Use this to verify upvote state: check if a[id='up_12345'] has class 'nosee' before and after clicking.",
-                    parameters: {
-                        type: "object",
-                        properties: {
-                            selector: { type: "string", description: "CSS selector for the element to check." },
-                            className: { type: "string", description: "The CSS class name to look for." },
-                        },
-                        required: ["selector", "className"],
+                name: "browser_has_class",
+                description:
+                    "Check whether the first element matching a selector has a specific CSS class. Use this to verify upvote state: check if a[id='up_12345'] has class 'nosee' before and after clicking.",
+                input_schema: {
+                    type: "object",
+                    properties: {
+                        selector: { type: "string", description: "CSS selector for the element to check." },
+                        className: { type: "string", description: "The CSS class name to look for." },
                     },
+                    required: ["selector", "className"],
                 },
             },
             execute: async ({ selector, className }) =>
@@ -293,7 +266,7 @@ export function createTools(session: BrowserSession, hooks?: ToolHooks): ToolReg
 
     return {
         definitions: tools.map((t) => t.definition),
-        byName: new Map(tools.map((t) => [t.definition.function.name, t])),
+        byName: new Map(tools.map((t) => [t.definition.name, t])),
     };
 }
 
@@ -301,7 +274,7 @@ export function createTools(session: BrowserSession, hooks?: ToolHooks): ToolReg
 
 export async function runLoop(
     model: string,
-    messages: ChatCompletionMessageParam[],
+    messages: MessageParam[],
     guardrail: GuardrailFn,
     tools: ToolRegistry,
     loginHandler?: LoginHandler
@@ -323,23 +296,30 @@ export async function runLoop(
 
         // ── Model call ────────────────────────────
         process.stdout.write(`[iter ${iterationIndex}] calling model... `);
-        const response = await client.chat.completions.create({
+        const response = await client.messages.create({
             model,
+            max_tokens: 1024,
+            system: SYSTEM_PROMPT,
             messages,
             tools: tools.definitions,
         });
 
-        const choice = response.choices[0];
         const contextSize = messages.length;
-        console.log(`${choice.finish_reason}`);
+        console.log(`${response.stop_reason}`);
 
-        messages.push(choice.message as ChatCompletionMessageParam);
+        // Push assistant response to history
+        messages.push({ role: "assistant", content: response.content });
 
         // ── Final answer ──────────────────────────
-        if (choice.finish_reason === "stop") {
+        if (response.stop_reason === "end_turn" || response.stop_reason === "stop_sequence") {
+            const textContent = response.content
+                .filter((b): b is TextBlock => b.type === "text")
+                .map((b) => b.text)
+                .join("\n");
+
             trace.push({ index: iterationIndex, outcome: "answer", toolEvents: [], contextSize, contextTrimmed });
             return {
-                answer: choice.message.content ?? "(no response)",
+                answer: textContent || "(no response)",
                 iterations: trace.length,
                 trace,
                 stoppedBy: "model",
@@ -347,13 +327,16 @@ export async function runLoop(
         }
 
         // ── Tool calls → execute → loop ───────────
-        if (choice.finish_reason === "tool_calls") {
+        if (response.stop_reason === "tool_use") {
             const toolEvents: ToolEvent[] = [];
+            const toolUseBlocks = response.content.filter(
+                (b): b is ToolUseBlock => b.type === "tool_use"
+            );
+            const toolResults: ToolResultBlockParam[] = [];
 
-            for (const call of choice.message.tool_calls ?? []) {
-                if (call.type !== "function") continue;
-                const name = call.function.name;
-                const args = JSON.parse(call.function.arguments || "{}") as Record<string, unknown>;
+            for (const call of toolUseBlocks) {
+                const name = call.name;
+                const args = call.input as Record<string, unknown>;
 
                 const tool = tools.byName.get(name);
                 process.stdout.write(`           → ${name}(${JSON.stringify(args)}) ... `);
@@ -367,21 +350,30 @@ export async function runLoop(
                 }
 
                 toolEvents.push({ tool: name, args, result });
-                messages.push({ role: "tool", tool_call_id: call.id, content: result });
+                toolResults.push({
+                    type: "tool_result",
+                    tool_use_id: call.id,
+                    content: result,
+                });
             }
+
+            let userTurnContent: MessageParam["content"] = toolResults;
 
             if (loginHandler) {
                 const loginEvent = await loginHandler();
                 if (loginEvent) {
                     toolEvents.push(loginEvent);
-                    messages.push({
-                        role: "user",
-                        content:
-                            "Authentication completed by harness. You are now logged in. Navigate back to https://news.ycombinator.com and complete your upvote task.",
-                    });
+                    userTurnContent = [
+                        ...toolResults,
+                        {
+                            type: "text",
+                            text: "Authentication completed by harness. You are now logged in. Navigate back to https://news.ycombinator.com and complete your upvote task.",
+                        },
+                    ];
                 }
             }
 
+            messages.push({ role: "user", content: userTurnContent });
             trace.push({ index: iterationIndex, outcome: "tool_calls", toolEvents, contextSize, contextTrimmed });
         }
     }
@@ -581,27 +573,22 @@ export function printHarnessResult(result: HarnessResult): void {
 
 // ── Runner ───────────────────────────────────────────────────────
 
-const MODEL = process.env.MODEL || "openai/gpt-3.5-turbo-0613";
+const MODEL = process.env.MODEL || "claude-3-5-sonnet-20241022";
 
 const TASK = `
-    Upvote a story on Hacker News.
+Upvote a story on Hacker News.
 
-    Go to https://news.ycombinator.com.
-    Call browser_get_stories to see ranked stories with their IDs and voted status.
-    Find the highest-ranked story where alreadyVoted is false.
-    Click its upvote arrow using the exact selector: a[id="up_STORYID"] (replace STORYID with the actual id).
+Go to https://news.ycombinator.com.
+Call browser_get_stories to see ranked stories with their IDs and voted status.
+Find the highest-ranked story where alreadyVoted is false.
+Click its upvote arrow using the exact selector: a[id="up_STORYID"] (replace STORYID with the actual id).
 `.trim();
 
-async function main() {
-    console.log(`Model: ${MODEL}`);
-    console.log(`Task:  upvote on Hacker News\n`);
+console.log(`Model: ${MODEL}`);
+console.log(`Task:  upvote on Hacker News\n`);
 
-    const result = await runHarness(TASK, MODEL, {
-        verify: verifySuccessfulUpvote,
-        maxAttempts: 3,
-    });
-    printHarnessResult(result);
-
-}
-
-main();
+const result = await runHarness(TASK, MODEL, {
+    verify: verifySuccessfulUpvote,
+    maxAttempts: 3,
+});
+printHarnessResult(result);
