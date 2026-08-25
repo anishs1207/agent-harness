@@ -73,17 +73,17 @@ export type HarnessResult = HarnessExecutionResult & {
 
 export const maxIterations =
     (limit: number): GuardrailFn =>
-    ({ iterations }) =>
-        iterations >= limit
-            ? { ok: false, reason: `Guardrail: reached iteration limit (${limit})` }
-            : { ok: true };
+        ({ iterations }) =>
+            iterations >= limit
+                ? { ok: false, reason: `Guardrail: reached iteration limit (${limit})` }
+                : { ok: true };
 
 export const maxMessages =
     (limit: number): GuardrailFn =>
-    ({ messages }) =>
-        messages.length > limit
-            ? { ok: false, reason: `Guardrail: context too large (${messages.length} messages)` }
-            : { ok: true };
+        ({ messages }) =>
+            messages.length > limit
+                ? { ok: false, reason: `Guardrail: context too large (${messages.length} messages)` }
+                : { ok: true };
 
 export function combineGuardrails(...fns: GuardrailFn[]): GuardrailFn {
     return (input) => {
@@ -97,17 +97,17 @@ export function combineGuardrails(...fns: GuardrailFn[]): GuardrailFn {
 
 export const stopAfterUpvote =
     (getUpvotedStory: () => { id: string; title?: string; rank?: number } | null): GuardrailFn =>
-    () => {
-        const story = getUpvotedStory();
-        if (story) {
-            const storyInfo =
-                story.title && story.rank
-                    ? `"${story.title}" (rank ${story.rank})`
-                    : `story ID ${story.id}`;
-            return { ok: false, reason: `Successfully upvoted ${storyInfo}` };
-        }
-        return { ok: true };
-    };
+        () => {
+            const story = getUpvotedStory();
+            if (story) {
+                const storyInfo =
+                    story.title && story.rank
+                        ? `"${story.title}" (rank ${story.rank})`
+                        : `story ID ${story.id}`;
+                return { ok: false, reason: `Successfully upvoted ${storyInfo}` };
+            }
+            return { ok: true };
+        };
 
 export const defaultGuardrails = combineGuardrails(
     maxIterations(15),
@@ -240,7 +240,7 @@ export function createTools(session: BrowserSession, hooks?: ToolHooks): ToolReg
                     try {
                         const stories = JSON.parse(result);
                         hooks.onStoriesLoaded(stories);
-                    } catch {}
+                    } catch { }
                 }
                 return result;
             },
