@@ -221,7 +221,8 @@ export class ComputerUseAgent {
         this.client = new Anthropic({
             apiKey: options?.anthropicApiKey || process.env.ANTHROPIC_API_KEY,
         });
-        this.model = options?.model ?? "claude-3-7-sonnet-20250219";
+        const rawModel = options?.model ?? process.env.MODEL;
+        this.model = (rawModel && !rawModel.includes("4-6")) ? rawModel : "claude-3-7-sonnet-20250219";
         this.maxSteps = options?.maxSteps ?? 20;
         this.env = options?.environment ?? new PlaywrightComputerEnvironment();
     }
@@ -406,10 +407,67 @@ export class ComputerUseAgent {
 
 // ── Standalone CLI Demo ──────────────────────────────────────────
 
+export const COMPUTER_BENCHMARK_TASKS = [
+    {
+        id: "hn-visual-browse",
+        title: "Hacker News: Visual Inspection",
+        task: "Look up the top story on Hacker News and print its title.",
+        url: "https://news.ycombinator.com",
+    },
+    {
+        id: "calculator-calc",
+        title: "Web Calculator: Visual Buttons",
+        task: "Navigate to an online calculator (https://www.desmos.com/scientific), click the buttons to calculate 128 * 4 + 12, and report the displayed answer.",
+        url: "https://www.desmos.com/scientific",
+    },
+    {
+        id: "drawing-canvas",
+        title: "Canvas: Freehand Drawing",
+        task: "Navigate to an interactive canvas or whiteboard (https://excalidraw.com), locate the drawing tool, draw a rectangle using mouse drag, and report completion.",
+        url: "https://excalidraw.com",
+    },
+    {
+        id: "slider-control",
+        title: "Slider: Coordinate Drag",
+        task: "Navigate to https://developer.mozilla.org/en-US/docs/Web/HTML/Element/input/range, locate the slider widget, and drag the slider handle towards the right.",
+        url: "https://developer.mozilla.org/en-US/docs/Web/HTML/Element/input/range",
+    },
+];
+
 async function main() {
-    const task = process.argv[2] || "Look up the top story on Hacker News and print its title.";
+    const args = process.argv.slice(2);
+
+    if (args.includes("--help") || args.includes("-h")) {
+        console.log(`
+Usage:
+  npm run agent:computer -- "[task description]" [optional initial url]
+
+Examples:
+  npm run agent:computer -- "Find the highest voted post on Hacker News"
+  npm run agent:computer -- "Click the search bar, type 'Claude' and press Enter" https://en.wikipedia.org
+
+Benchmark Tasks Available:
+${COMPUTER_BENCHMARK_TASKS.map((t, i) => `  ${i + 1}. [${t.id}] ${t.title}\n     Task: ${t.task}`).join("\n\n")}
+`);
+        return;
+    }
+
+    let task: string;
+    let initialUrl: string;
+
+    if (args.length > 0) {
+        task = args[0];
+        initialUrl = args[1] || "https://news.ycombinator.com";
+    } else {
+        const defaultBenchmark = COMPUTER_BENCHMARK_TASKS[0];
+        console.log(`\nNo custom task provided. Running default benchmark task: "${defaultBenchmark.title}"`);
+        console.log(`To run a custom task, use: npm run agent:computer -- "Your task description here"\n`);
+        task = defaultBenchmark.task;
+        initialUrl = defaultBenchmark.url;
+    }
+
     const agent = new ComputerUseAgent();
-    const result = await agent.run(task, "https://news.ycombinator.com");
+    const result = await agent.run(task, initialUrl);
     console.log("\n── Run Summary ──");
     console.log(`Success: ${result.success}`);
     console.log(`Steps taken: ${result.steps}`);
@@ -419,6 +477,16 @@ async function main() {
 }
 
 // Execute if run directly
-if (process.argv[1] && process.argv[1].endsWith("computer-use.ts")) {
-    main().catch(console.error);
+const isDirectRun = Boolean(
+    process.argv[1] && (
+        process.argv[1].includes("computerUseAgent") ||
+        process.argv[1].includes("computer-use")
+    )
+);
+
+if (isDirectRun) {
+    main().catch((err) => {
+        console.error("Computer Use Agent error:", err);
+        process.exit(1);
+    });
 }

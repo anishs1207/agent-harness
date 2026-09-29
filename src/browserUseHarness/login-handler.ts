@@ -1,4 +1,4 @@
-import type { BrowserSession } from "./browser.js";
+import type { BrowserSession } from "./index.js";
 
 export type ToolEvent = {
     tool: string;

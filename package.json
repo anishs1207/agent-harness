@@ -8,6 +8,11 @@
   },
   "scripts": {
     "build": "tsc",
+    "browser-use-harness": "npm run build && node dist/browserUseHarness/cli.js",
+    "browser-use-harness:eval": "npm run build && node dist/browserUseHarness/evals.js",
+    "agent:browser": "npm run browser-use-harness --",
+    "agent:computer": "tsc && node dist/computerUseHarness/index.js",
+    "agent:harness": "tsc && node dist/index.js",
     "dev": "tsc && node dist/index.js",
     "start": "node dist/index.js"
   },

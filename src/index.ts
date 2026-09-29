@@ -1,8 +1,8 @@
 import dotenv from "dotenv";
 import Anthropic from "@anthropic-ai/sdk";
 import type { MessageParam, Tool as AnthropicTool, TextBlock, ToolUseBlock, ToolResultBlockParam } from "@anthropic-ai/sdk/resources/messages";
-import { BrowserSession } from "./browser.js";
-import { createLoginHandler, type LoginHandler, type ToolEvent } from "./login-handler.js";
+import { BrowserSession } from "./browserUseHarness/index.js";
+import { createLoginHandler, type LoginHandler, type ToolEvent } from "./browserUseHarness/login-handler.js";
 
 dotenv.config();
 
@@ -117,9 +117,13 @@ export const defaultGuardrails = combineGuardrails(
 // ── Context & Client ─────────────────────────────────────────────
 
 const SYSTEM_PROMPT = `
-You are a helpful assistant with access to tools.
-Use tools whenever they help you give a more accurate answer.
-When you have enough information, respond directly and concisely.
+You are a browser automation agent. Complete the user's task in the live Playwright browser.
+Inspect the page before acting. Prefer accessible locators (role and label) over brittle CSS selectors.
+After every consequential action, inspect or query the page again and verify the requested end state.
+Never claim success based only on a click returning without error. Recover from stale selectors, overlays,
+navigation, delayed UI, and validation errors by observing the updated page and trying a different action.
+Use browser_evaluate only for reading page state, never to bypass the visible user workflow.
+When the task is complete, respond with a concise result and the evidence you verified.
 `.trim();
 
 export function createContext(task: string): MessageParam[] {
@@ -135,7 +139,11 @@ export function trimContext(
     if (messages.length <= maxMessages) return messages;
 
     const [first, ...rest] = messages;
-    const trimmed = rest.slice(rest.length - (maxMessages - 1));
+    // Every assistant tool_use message must remain immediately followed by its
+    // user tool_result message. History after the initial task is made of those
+    // two-message turns, so retain a whole-number count of pairs.
+    const pairCapacity = Math.max(0, Math.floor((maxMessages - 1) / 2) * 2);
+    const trimmed = pairCapacity === 0 ? [] : rest.slice(-pairCapacity);
     return [first, ...trimmed];
 }
 
@@ -179,6 +187,25 @@ export function createTools(session: BrowserSession, hooks?: ToolHooks): ToolReg
                 input_schema: { type: "object", properties: {} },
             },
             execute: async () => session.getText(),
+        },
+        {
+            definition: {
+                name: "browser_snapshot",
+                description: "Return an accessibility snapshot of the page. Use this first and after actions to discover stable roles, names, headings, controls, and state.",
+                input_schema: { type: "object", properties: {} },
+            },
+            execute: async () => session.snapshot(),
+        },
+        {
+            definition: {
+                name: "browser_inspect",
+                description: "Return structured metadata for interactive elements, optionally restricted by a CSS selector.",
+                input_schema: {
+                    type: "object",
+                    properties: { selector: { type: "string", description: "Optional CSS selector; defaults to interactive elements." } },
+                },
+            },
+            execute: async ({ selector }) => session.inspect(selector as string | undefined),
         },
         {
             definition: {
@@ -229,6 +256,37 @@ export function createTools(session: BrowserSession, hooks?: ToolHooks): ToolReg
         },
         {
             definition: {
+                name: "browser_click_by_role",
+                description: "Click by accessible role and name. Prefer this over CSS when the accessibility snapshot exposes the control.",
+                input_schema: {
+                    type: "object",
+                    properties: {
+                        role: { type: "string", description: "ARIA role such as button, link, checkbox, or menuitem." },
+                        name: { type: "string", description: "Accessible name shown in the snapshot." },
+                        exact: { type: "boolean", description: "Require an exact name match (default true)." },
+                    },
+                    required: ["role", "name"],
+                },
+            },
+            execute: async ({ role, name, exact }) => session.clickByRole(role as string, name as string, exact !== false),
+        },
+        {
+            definition: {
+                name: "browser_fill_by_label",
+                description: "Fill a form field using its associated visible or ARIA label.",
+                input_schema: {
+                    type: "object",
+                    properties: {
+                        label: { type: "string", description: "Exact accessible label." },
+                        value: { type: "string", description: "Value to enter." },
+                    },
+                    required: ["label", "value"],
+                },
+            },
+            execute: async ({ label, value }) => session.fillByLabel(label as string, value as string),
+        },
+        {
+            definition: {
                 name: "browser_get_stories",
                 description:
                     "Get a structured list of Hacker News stories on the current page — rank, story ID, title, and whether you've already voted. Use this instead of browser_get_text to accurately identify which story to upvote.",
@@ -247,6 +305,108 @@ export function createTools(session: BrowserSession, hooks?: ToolHooks): ToolReg
         },
         {
             definition: {
+                name: "browser_get_title",
+                description: "Get the title of the current page.",
+                input_schema: { type: "object", properties: {} },
+            },
+            execute: async () => session.getTitle(),
+        },
+        {
+            definition: {
+                name: "browser_press_key",
+                description: "Press a keyboard key on the active element or page (e.g. 'Enter', 'Escape', 'ArrowDown', 'Tab').",
+                input_schema: {
+                    type: "object",
+                    properties: {
+                        key: { type: "string", description: "The name of the key to press." },
+                    },
+                    required: ["key"],
+                },
+            },
+            execute: async ({ key }) => session.pressKey(key as string),
+        },
+        {
+            definition: {
+                name: "browser_scroll",
+                description: "Scroll the page horizontally and/or vertically by pixel delta values.",
+                input_schema: {
+                    type: "object",
+                    properties: {
+                        deltaX: { type: "number", description: "Horizontal scroll amount in pixels (default 0)." },
+                        deltaY: { type: "number", description: "Vertical scroll amount in pixels (default 300)." },
+                    },
+                },
+            },
+            execute: async ({ deltaX, deltaY }) => session.scroll(Number(deltaX ?? 0), Number(deltaY ?? 300)),
+        },
+        {
+            definition: {
+                name: "browser_select_option",
+                description: "Select an option from a <select> dropdown by its value or label.",
+                input_schema: {
+                    type: "object",
+                    properties: {
+                        selector: { type: "string", description: "CSS selector for the <select> element." },
+                        value: { type: "string", description: "The value of the option to select." },
+                    },
+                    required: ["selector", "value"],
+                },
+            },
+            execute: async ({ selector, value }) => session.selectOption(selector as string, value as string),
+        },
+        {
+            definition: {
+                name: "browser_wait",
+                description: "Wait for a specified number of milliseconds (e.g. 1000 for 1 second).",
+                input_schema: {
+                    type: "object",
+                    properties: {
+                        duration: { type: "number", description: "Milliseconds to wait." },
+                    },
+                    required: ["duration"],
+                },
+            },
+            execute: async ({ duration }) => session.wait(Number(duration)),
+        },
+        {
+            definition: {
+                name: "browser_wait_for_selector",
+                description: "Wait until an element matching the given CSS selector is visible on the page.",
+                input_schema: {
+                    type: "object",
+                    properties: {
+                        selector: { type: "string", description: "CSS selector of the element to wait for." },
+                        timeout: { type: "number", description: "Maximum wait time in ms (default 5000)." },
+                    },
+                    required: ["selector"],
+                },
+            },
+            execute: async ({ selector, timeout }) => session.waitForSelector(selector as string, timeout ? Number(timeout) : 5000),
+        },
+        {
+            definition: {
+                name: "browser_screenshot",
+                description: "Capture a screenshot of the current viewport.",
+                input_schema: { type: "object", properties: {} },
+            },
+            execute: async () => session.screenshot(),
+        },
+        {
+            definition: {
+                name: "browser_evaluate",
+                description: "Evaluate a JavaScript expression in the context of the page and return the result.",
+                input_schema: {
+                    type: "object",
+                    properties: {
+                        expression: { type: "string", description: "JavaScript expression to evaluate." },
+                    },
+                    required: ["expression"],
+                },
+            },
+            execute: async ({ expression }) => session.evaluate(expression as string),
+        },
+        {
+            definition: {
                 name: "browser_has_class",
                 description:
                     "Check whether the first element matching a selector has a specific CSS class. Use this to verify upvote state: check if a[id='up_12345'] has class 'nosee' before and after clicking.",
@@ -261,6 +421,21 @@ export function createTools(session: BrowserSession, hooks?: ToolHooks): ToolReg
             },
             execute: async ({ selector, className }) =>
                 session.hasClass(selector as string, className as string),
+        },
+        {
+            definition: {
+                name: "browser_get_attribute",
+                description: "Read one DOM attribute to verify state such as aria-checked, href, value, or data-status.",
+                input_schema: {
+                    type: "object",
+                    properties: {
+                        selector: { type: "string" },
+                        attribute: { type: "string" },
+                    },
+                    required: ["selector", "attribute"],
+                },
+            },
+            execute: async ({ selector, attribute }) => session.getAttribute(selector as string, attribute as string),
         },
     ];
 
@@ -503,7 +678,7 @@ async function runHarnessAttempt(
 
         const messages = createContext(task);
         const loginHandler = createLoginHandler(session, {
-            onUpvoteSuccess: (storyId) => recordUpvoteSuccess(storyId, "login"),
+            onUpvoteSuccess: (storyId: string) => recordUpvoteSuccess(storyId, "login"),
         });
         const result = await runLoop(model, messages, guardrails, tools, loginHandler);
         return { task, model, ...result };
@@ -573,9 +748,10 @@ export function printHarnessResult(result: HarnessResult): void {
 
 // ── Runner ───────────────────────────────────────────────────────
 
-const MODEL = process.env.MODEL || "claude-3-5-sonnet-20241022";
+export async function main() {
+    const MODEL = process.env.MODEL || "claude-sonnet-4-6";
 
-const TASK = `
+    const TASK = process.argv[2] || `
 Upvote a story on Hacker News.
 
 Go to https://news.ycombinator.com.
@@ -584,11 +760,25 @@ Find the highest-ranked story where alreadyVoted is false.
 Click its upvote arrow using the exact selector: a[id="up_STORYID"] (replace STORYID with the actual id).
 `.trim();
 
-console.log(`Model: ${MODEL}`);
-console.log(`Task:  upvote on Hacker News\n`);
+    console.log(`Model: ${MODEL}`);
+    console.log(`Task:  ${TASK.split("\n")[0]}\n`);
 
-const result = await runHarness(TASK, MODEL, {
-    verify: verifySuccessfulUpvote,
-    maxAttempts: 3,
-});
-printHarnessResult(result);
+    const result = await runHarness(TASK, MODEL, {
+        verify: TASK.includes("Upvote") ? verifySuccessfulUpvote : undefined,
+        maxAttempts: 3,
+    });
+    printHarnessResult(result);
+}
+
+const isDirectRun = Boolean(
+    process.argv[1] && (
+        process.argv[1].endsWith("src\\index.ts") ||
+        process.argv[1].endsWith("src/index.ts") ||
+        process.argv[1].endsWith("dist\\index.js") ||
+        process.argv[1].endsWith("dist/index.js")
+    )
+);
+
+if (isDirectRun) {
+    main().catch(console.error);
+}
