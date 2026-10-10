@@ -1,5 +1,13 @@
 # Browser Use Harness
 
+This repository also includes a workspace-scoped coding agent harness. Run it with:
+
+```sh
+npm run agent:code -- "Fix the failing tests"
+```
+
+See [`src/codingAgentHarness/README.md`](src/codingAgentHarness/README.md) for its architecture, tools, and safety boundaries.
+
 The harness uses an Anthropic agent loop with Playwright-backed browser tools. Runtime source, eval fixtures, and configuration live in this repository; the eval suite does not depend on public websites.
 
 ## Run
