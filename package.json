@@ -15,6 +15,8 @@
     "agent:code": "npm run build && node dist/codingAgentHarness/cli.js",
     "agent:code:eval": "npm run build && node dist/codingAgentHarness/evals.js",
     "test:code": "npm run build && node dist/codingAgentHarness/workspace.test.js",
+    "jev": "npm run build && node dist/testingJev/index.js",
+    "jev:eval": "npm run build && node dist/testingJev/evals.js",
     "agent:harness": "tsc && node dist/index.js",
     "dev": "tsc && node dist/index.js",
     "start": "node dist/index.js"
