@@ -1,220 +1,181 @@
-import os
-from langfuse import get_client
-from langfuse.openai import OpenAI as LFOpenAI
-from langfuse import observe
-from langfuse import get_client as _gc
-from langfuse import propagate_attributes
+"""HTTP and CLI entry points for the observable production agent."""
+
+from __future__ import annotations
+
+import argparse
+import hmac
+import logging
 import uuid
-from openai import OpenAI
-import json as _json
-from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
-from dotenv import load_dotenv
+from contextlib import asynccontextmanager, nullcontext
+from typing import Annotated, Any
 
-# Load environment variables from .env
-load_dotenv()
+import uvicorn
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from langchain_core.runnables import RunnableConfig
+from pydantic import BaseModel, Field
 
-MODEL = os.getenv("MODEL", "google/gemma-4-26b-a4b-it:free") 
+from agent import AgentRuntime, build_agent, extract_answer, user_message
+from config import Settings
 
-langfuse = get_client()
-assert langfuse.auth_check(), "Auth failed — check keys and that LANGFUSE_HOST region matches your project."
-print("Langfuse connected.")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+logger = logging.getLogger("production-agent")
 
-# OpenRouter is OpenAI-API-compatible -> reuse the OpenAI client, point base_url at it.
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=os.environ["OPENROUTER_API_KEY"],
-)
 
-# --- Two trivial tools ---
-def get_word_length(word: str) -> int:
-    return len(word)
+class InvokeRequest(BaseModel):
+    message: str = Field(min_length=1)
+    thread_id: str = Field(min_length=1, max_length=128)
+    user_id: str | None = Field(default=None, max_length=128)
 
-def multiply(a: float, b: float) -> float:
-    return a * b
 
-TOOLS = {
-    "get_word_length": get_word_length,
-    "multiply": multiply,
-}
+class InvokeResponse(BaseModel):
+    answer: str
+    thread_id: str
+    request_id: str
 
-TOOL_SPEC = """You have these tools. To call one, output EXACTLY one line:
-ACTION: <tool_name> <json_args>
-Examples:
-ACTION: get_word_length {"word": "observability"}
-ACTION: multiply {"a": 6, "b": 7}
-When you have the final answer, output:
-FINAL: <answer>
-Tools:
-- get_word_length(word): returns integer length
-- multiply(a, b): returns a*b
-"""
 
-# Agentic system setup
+def _callbacks(settings: Settings) -> list[Any]:
+    callbacks: list[Any] = []
+    if settings.langsmith_enabled:
+        from langchain_core.tracers import LangChainTracer
+        from langsmith import Client
 
-def call_model(messages):
-    resp = client.chat.completions.create(model=MODEL, messages=messages, max_tokens=300)
-    return resp.choices[0].message.content
+        callbacks.append(LangChainTracer(project_name=settings.langsmith_project, client=Client()))
+    if settings.langfuse_enabled:
+        from langfuse.langchain import CallbackHandler
 
-def run_agent(question, max_steps=5):
-    messages = [
-        {"role": "system", "content": TOOL_SPEC},
-        {"role": "user", "content": question},
-    ]
-    for step in range(max_steps):
-        out = call_model(messages)
-        print(f"[step {step}] model: {out.strip()[:120]}")
-        if "FINAL:" in out:
-            return out.split("FINAL:")[-1].strip()
-        if "ACTION:" in out:
-            line = [l for l in out.splitlines() if l.strip().startswith("ACTION:")][0]
-            rest = line.split("ACTION:")[-1].strip()
-            name, _, arg_str = rest.partition(" ")
-            args = _json.loads(arg_str)
-            result = TOOLS[name](**args)
-            print(f"[step {step}] tool {name}{args} -> {result}")
-            messages.append({"role": "assistant", "content": out})
-            messages.append({"role": "user", "content": f"OBSERVATION: {result}"})
-        else:
-            messages.append({"role": "assistant", "content": out})
-            messages.append({"role": "user", "content": "Use ACTION: or FINAL:"})
-    return "(no final answer)"
+        callbacks.append(CallbackHandler())
+    return callbacks
 
-print(run_agent("How long is the word 'observability', and what is that number times 3?"))
 
-# Build the OTel pipeline by hand (tracer -> span processor -> exporter)
-otel_provider = TracerProvider()
-otel_provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
-trace.set_tracer_provider(otel_provider)
-tracer = trace.get_tracer("class24")
+def invoke_agent(
+    runtime: AgentRuntime,
+    settings: Settings,
+    payload: InvokeRequest,
+    *,
+    request_id: str | None = None,
+) -> InvokeResponse:
+    if len(payload.message) > settings.max_input_chars:
+        raise ValueError(f"message exceeds {settings.max_input_chars} characters")
+    request_id = request_id or str(uuid.uuid4())
+    config: RunnableConfig = {
+        "configurable": {"thread_id": payload.thread_id},
+        "callbacks": _callbacks(settings),
+        "metadata": {
+            "request_id": request_id,
+            "environment": settings.environment,
+            "langfuse_session_id": payload.thread_id,
+            "langfuse_user_id": payload.user_id,
+            "langfuse_tags": ["langgraph", settings.environment],
+        },
+        "run_name": "production-agent",
+        "recursion_limit": settings.recursion_limit,
+        "tags": ["langgraph", settings.environment],
+    }
 
-# Manually trace one agent step as raw OTel spans.
-# A "generation" in OTel is just a span with conventionally-named attributes.
-with tracer.start_as_current_span("agent-run") as root:
-    root.set_attribute("user", "student")
-    with tracer.start_as_current_span("llm-call") as gen:
-        gen.set_attribute("gen_ai.request.model", MODEL)
-        gen.set_attribute("gen_ai.usage.input_tokens", 412)   # we'd have to count these ourselves
-        gen.set_attribute("gen_ai.usage.output_tokens", 87)
-        gen.set_attribute("llm.prompt", "How long is 'observability' x3?")
-        gen.set_attribute("llm.completion", "13 letters; 13 x 3 = 39.")
-# Spans print on exit. Read the output carefully.
+    trace_context: Any = nullcontext()
+    if settings.langfuse_enabled:
+        from langfuse import propagate_attributes
 
-# Same constructor, now auto-traced.
-client = LFOpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=os.environ["OPENROUTER_API_KEY"],
-)
-
-@observe()
-def agent_step(messages, step):
-    out = call_model(messages)   # auto-traced generation nests under this span
-    return out
-
-@observe()
-def traced_agent(question, max_steps=5):
-    messages = [
-        {"role": "system", "content": TOOL_SPEC},
-        {"role": "user", "content": question},
-    ]
-    for step in range(max_steps):
-        out = agent_step(messages, step)
-        if "FINAL:" in out:
-            return out.split("FINAL:")[-1].strip()
-        if "ACTION:" in out:
-            line = [l for l in out.splitlines() if l.strip().startswith("ACTION:")][0]
-            rest = line.split("ACTION:")[-1].strip()
-            name, _, arg_str = rest.partition(" ")
-            args = _json.loads(arg_str)
-            result = TOOLS[name](**args)
-            messages.append({"role": "assistant", "content": out})
-            messages.append({"role": "user", "content": f"OBSERVATION: {result}"})
-        else:
-            messages.append({"role": "assistant", "content": out})
-            messages.append({"role": "user", "content": "Use ACTION: or FINAL:"})
-    return "(no final answer)"
-
-answer = traced_agent("How long is the word 'observability', and what is that number times 3?")
-langfuse.flush()   # short-lived process -> force the batch out (more on this in Part 5)
-print("Answer:", answer)
-print("Open https://cloud.langfuse.com -> your project -> Traces. Click the latest trace.")
-
-with langfuse.start_as_current_observation(as_type="span", name="manual-demo") as span:
-    span.update(input={"task": "demo"})
-    with langfuse.start_as_current_observation(
-        as_type="generation", name="llm-call", model=MODEL
-    ) as gen:
-        resp = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role": "user", "content": "Say 'traced' and nothing else."}],
-            max_tokens=10,
+        trace_context = propagate_attributes(
+            session_id=payload.thread_id,
+            user_id=payload.user_id,
+            tags=["langgraph", settings.environment],
+            metadata={"request_id": request_id},
+            trace_name="production-agent",
         )
-        gen.update(output=resp.choices[0].message.content)
-    span.update(output="done")
+    with trace_context:
+        result = runtime.graph.invoke({"messages": [user_message(payload.message)]}, config=config)
+    return InvokeResponse(
+        answer=extract_answer(result["messages"]),
+        thread_id=payload.thread_id,
+        request_id=request_id,
+    )
 
-langfuse.flush()
-print("Manual trace sent. Note how the generation nests under the span in the UI.")
 
-# Capture the trace id of a fresh run so we can attach a score to it.
-with langfuse.start_as_current_observation(as_type="span", name="scored-run") as root:
-    answer = traced_agent("What is the length of 'trace' multiplied by 10?")
-    trace_id = langfuse.get_current_trace_id()
-    root.update(output=answer)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = Settings.from_env()
+    app.state.settings = settings
+    app.state.runtime = build_agent(settings)
+    logger.info("agent started model=%s environment=%s", settings.model, settings.environment)
+    try:
+        yield
+    finally:
+        if settings.langfuse_enabled:
+            from langfuse import get_client
 
-langfuse.flush()
-print("answer:", answer, "| trace:", trace_id)
+            get_client().flush()
+        app.state.runtime.close()
 
-# Simple LLM-as-judge: does the answer correctly reason about the task?
-judge_prompt = f"""You are grading an agent answer. Question involved len('trace')=5 times 10 = 50.
-Agent answer: {answer!r}
-Reply with ONLY a number 1 if the answer is 50 (or clearly states 50), else 0."""
 
-judge = client.chat.completions.create(
-    model=MODEL, messages=[{"role": "user", "content": judge_prompt}], max_tokens=5
-)
-raw = judge.choices[0].message.content.strip()
-score_value = 1.0 if "1" in raw else 0.0
+app = FastAPI(title="Observable LangGraph Agent", version="1.0.0", lifespan=lifespan)
 
-langfuse.create_score(
-    trace_id=trace_id,
-    name="judge_correct",
-    value=score_value,
-    comment=f"LLM judge raw output: {raw!r}",
-)
-langfuse.flush()
-print(f"Attached score judge_correct={score_value} to trace {trace_id}")
-print("Refresh the trace in the UI — the score now appears on it.")
 
-# Group two turns of a conversation under one session, tagged as a non-prod environment.
-# v4: trace-level fields (session_id, tags, user_id, environment) are set with
-# propagate_attributes() as a context manager — everything traced inside inherits them.
+def authorize(
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+) -> None:
+    expected = request.app.state.settings.api_key
+    if expected is None:
+        return
+    supplied = authorization.removeprefix("Bearer ") if authorization else ""
+    if not hmac.compare_digest(supplied, expected):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
-session_id = f"demo-session-{uuid.uuid4().hex[:8]}"
 
-for turn in ["How long is 'span'?", "Multiply that by 4."]:
-    with propagate_attributes(session_id=session_id, tags=["class24", "env:dev"]):
-        with langfuse.start_as_current_observation(as_type="span", name="chat-turn") as s:
-            ans = traced_agent(turn)
-            s.update(output=ans)
+@app.get("/healthz")
+def health(request: Request) -> dict[str, str]:
+    return {"status": "ok", "model": request.app.state.settings.model}
 
-langfuse.flush()
-print(f"Two turns grouped under session {session_id}. See Sessions view in the UI.")
 
-# THE BREAK: run, then immediately "end" without flushing.
-# In a real script the process would exit here. We simulate by NOT calling flush
-# and creating a brand-new client so nothing else triggers a flush.
+@app.post("/v1/agent/invoke", response_model=InvokeResponse)
+def invoke(
+    payload: InvokeRequest,
+    request: Request,
+    _: Annotated[None, Depends(authorize)],
+) -> InvokeResponse:
+    request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+    try:
+        return invoke_agent(
+            request.app.state.runtime,
+            request.app.state.settings,
+            payload,
+            request_id=request_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception:
+        logger.exception("agent invocation failed request_id=%s", request_id)
+        raise HTTPException(status_code=500, detail="Agent invocation failed") from None
 
-_lf = _gc()
 
-with _lf.start_as_current_observation(as_type="span", name="unflushed-run") as s:
-    s.update(input={"q": "this trace may never arrive"}, output="done")
+def cli() -> None:
+    parser = argparse.ArgumentParser(description="Observable LangGraph agent")
+    parser.add_argument("message", nargs="?", help="Run one message instead of the API")
+    parser.add_argument("--thread-id", default="cli")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8000)
+    args = parser.parse_args()
 
-# (no flush)  -> check the UI now. The 'unflushed-run' trace is likely missing/partial.
-print("Created 'unflushed-run' WITHOUT flushing. Check the UI — likely not there yet.")
+    if args.message:
+        settings = Settings.from_env()
+        runtime = build_agent(settings)
+        try:
+            response = invoke_agent(
+                runtime,
+                settings,
+                InvokeRequest(message=args.message, thread_id=args.thread_id),
+            )
+            print(response.answer)
+        finally:
+            if settings.langfuse_enabled:
+                from langfuse import get_client
 
-# THE FIX: one line. Forces the queue to send and blocks until done.
-_lf.flush()
-print("Flushed. 'unflushed-run' now appears in the UI.")
-print("Lesson: ANY OTel-based tracing batches by default ->")
-print("short-lived processes need an explicit flush() / shutdown().")
+                get_client().flush()
+            runtime.close()
+        return
+    uvicorn.run("main:app", host=args.host, port=args.port, reload=False)
+
+
+if __name__ == "__main__":
+    cli()

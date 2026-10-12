@@ -1,0 +1,34 @@
+schema_version = "1.4"
+
+[task]
+name = "agent-harness/async-singleflight-cache"
+version = "1.0.0"
+description = "Repair a production-style asyncio stale-while-revalidate cache with single-flight loading and race-safe invalidation."
+authors = [{ name = "Agent Harness maintainers" }]
+keywords = ["python", "asyncio", "concurrency", "cache", "debugging"]
+
+[metadata]
+difficulty = "hard"
+category = "software_engineering"
+tags = ["python", "asyncio", "race-conditions", "hidden-tests"]
+difficulty_explanation = "The implementation must satisfy interacting timing, cancellation, invalidation, failure, and LRU invariants without leaking tasks or exceptions."
+
+[agent]
+timeout_sec = 1800.0
+
+[verifier]
+timeout_sec = 120.0
+
+[environment]
+network_mode = "no-network"
+build_timeout_sec = 300.0
+cpus = 2
+memory_mb = 2048
+storage_mb = 4096
+gpus = 0
+
+[environment.env]
+
+[verifier.env]
+
+[solution.env]

@@ -2,7 +2,7 @@ import { JevClient } from "./client.js";
 import type { ChoiceAnswer, NoulAnswer, PermissionAction, PermissionAssessment, PermissionDecision, ScoreAnswer } from "./types.js";
 
 export class JevPermissionGate {
-    constructor(private readonly client = new JevClient()) {}
+    constructor(private readonly client = new JevClient()) { }
 
     async assess(action: PermissionAction): Promise<PermissionAssessment> {
         const response = await this.client.decide(
