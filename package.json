@@ -14,6 +14,8 @@
     "agent:computer": "tsc && node dist/computerUseHarness/index.js",
     "agent:code": "npm run build && node dist/codingAgentHarness/cli.js",
     "agent:code:eval": "npm run build && node dist/codingAgentHarness/evals.js",
+    "agent:personas": "npm run build && node dist/personnas/cli.js",
+    "test:personas": "npm run build && node dist/personnas/harness.test.js",
     "test:code": "npm run build && node dist/codingAgentHarness/workspace.test.js",
     "jev": "npm run build && node dist/testingJev/index.js",
     "jev:eval": "npm run build && node dist/testingJev/evals.js",

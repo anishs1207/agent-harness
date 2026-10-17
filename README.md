@@ -1,5 +1,15 @@
 # Browser Use Harness
 
+## Product persona panel
+
+Ask five product specialists a question from the CLI:
+
+```sh
+npm run agent:personas -- "Should we add a free trial?"
+```
+
+Run without a question for an interactive conversation. See [`src/personnas/README.md`](src/personnas/README.md).
+
 This repository also includes a workspace-scoped coding agent harness. Run it with:
 
 ```sh
